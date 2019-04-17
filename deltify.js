@@ -56,14 +56,13 @@ function rollHash(oldHash, buffer, idx) {
  */
 function encode(oldText, newText, buffer) {
   // Build hash table for oldText for speed up
-  const hashArray = new Int32Array(65536);
-  for (let i = 0; i < 65536; i++) hashArray[i] = -1;
+  const hashmap = new Map();
   // Calculate from back to front to prioritise blocks in the beginning, as
   // * it is searched first, and
   // * in repetitive cases, it can capture longer duplication
   for (let i = ((oldText.length / HASH_LENGTH - 1) | 0) * HASH_LENGTH; i >= 0; i -= HASH_LENGTH) {
     let hash = calcHash(oldText, i);
-    hashArray[hash & 0xffff] = i;
+    hashmap.set(hash, i);
   }
 
   // Allocate buffer, with extra space to simply boundary check.
@@ -82,9 +81,9 @@ function encode(oldText, newText, buffer) {
     // Recalculate or rolls the hash based on index
     hash = hashIndex + 1 == index ? rollHash(hash, newText, index) : calcHash(newText, index);
     hashIndex = index;
-    let ptr = hashArray[hash & 0xffff];
+    let ptr = hashmap.get(hash);
     // Either it does not match or this is a hash collision.
-    if (ptr == -1 || oldText.compare(newText, index, index + HASH_LENGTH, ptr, ptr + HASH_LENGTH) != 0) {
+    if (ptr == null || oldText.compare(newText, index, index + HASH_LENGTH, ptr, ptr + HASH_LENGTH) != 0) {
       index++;
       continue;
     }
