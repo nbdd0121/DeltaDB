@@ -60,11 +60,14 @@ class BlobDatabase {
    *
    * @param {string} location Location of the database
    * @param {boolean} [options.readonly] If set to true, delta chain reduction will not happen
-   *   when calling `get()`.
+   *   when calling `get()`. Default to false.
+   * @param {boolean} [options.verify] If set to true, hash will be re-computed and checked when
+   *   calling `get()`. An exception will be thrown if it mismatches. Default to false.
    */
   constructor(location, options) {
     options = Object.assign({
       readonly: false,
+      verify: false,
     }, options);
 
     const db = typeof location != 'object' ? levelup(rocksdb(location), {
@@ -119,18 +122,16 @@ class BlobDatabase {
     let format = chunk.readUInt32LE(4);
 
     switch (format) {
-      case FORMAT_NONE: return {
-        hash: hash,
-        buffer: chunk.slice(8),
-        base: null,
-        delta: null,
-      };
-      case FORMAT_ZLIB: return {
-        hash: hash,
-        buffer: await promisify(zlib.inflate)(chunk.slice(8)),
-        base: null,
-        delta: null,
-      };
+      case FORMAT_NONE: {
+        let buffer = chunk.slice(8);
+        if (buffer.length != fileSize) throw new Error('Length mismatch');
+        return { hash, buffer, base: null, delta: null };
+      }
+      case FORMAT_ZLIB: {
+        let buffer = await promisify(zlib.inflate)(chunk.slice(8));
+        if (buffer.length != fileSize) throw new Error('Length mismatch');
+        return { hash, buffer, base: null, delta: null };
+      }
       case FORMAT_DELT: {
         // Retrieve the base hash
         let baseHash = Buffer.alloc(32);
@@ -242,8 +243,7 @@ class BlobDatabase {
       let base = await this._chainGet(blob.base.hash);
       if (!base) {
         // In this case the parent might be corrupted or otherwise somehow missing.
-        console.warn(`Cannot find ${baseHash.toString('hex')} when trying to load ${baseHash.toString('hex')}`);
-        return null;
+        throw new Error(`Cannot find ${baseHash.toString('hex')} when trying to load ${hash.toString('hex')}`);
       }
       let body = Buffer.alloc(blob.buffer.length);
       body = deltify.decode(base.buffer, blob.delta, body);
@@ -265,7 +265,11 @@ class BlobDatabase {
   async get(hash) {
     hash = verifyHash(hash);
     let blob = await this._chainGet(hash);
-    return blob ? blob.buffer : null;
+    if (!blob) return null;
+    if (this.options.verify) {
+      if (calcHash(blob.buffer).compare(hash) != 0) throw new Error('Hash verification failed');
+    }
+    return blob.buffer;
   }
 
   /**
