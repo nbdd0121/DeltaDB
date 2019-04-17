@@ -196,16 +196,13 @@ class BlobDatabase {
   }
 
   /**
-   * Retrieve a blob and decompress. Deltified blobs will be kept as is and not resolved.
+   * Convert raw blob to an object and decompress. Deltified blobs are not resolved.
    *
    * @param {Buffer} hash 256-bit hash of the object to retrieve
+   * @param {Buffer} chunk Raw buffer
    * @return {Promise<Blob>} Returns the blob object
    */
-  async _blobGet(hash) {
-    // Read the data chunk from store
-    let chunk = await this._rawGet(hash);
-    if (chunk == null) return null;
-
+  async _rawToBlob(hash, chunk) {
     // Read format. The file size can be used to optimise buffer allocation/growth.
     let fileSize = chunk.readUInt32LE(0);
     let format = chunk.readUInt32LE(4);
@@ -245,6 +242,19 @@ class BlobDatabase {
       }
       default: throw new RangeError('Unsupported format');
     }
+  }
+
+  /**
+   * Retrieve a blob and decompress. Deltified blobs will be kept as is and not resolved.
+   *
+   * @param {Buffer} hash 256-bit hash of the object to retrieve
+   * @return {Promise<Blob>} Returns the blob object
+   */
+  async _blobGet(hash) {
+    // Read the data chunk from store
+    let chunk = await this._rawGet(hash);
+    if (chunk == null) return null;
+    return this._rawToBlob(hash, chunk);
   }
 
   /**
