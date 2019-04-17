@@ -3,7 +3,7 @@ const { promisify } = require('util');
 const zlib = require('zlib');
 const deltify = require('./deltify');
 const levelup = require('levelup');
-const leveldown = require('leveldown');
+const rocksdb = require('rocksdb');
 
 const FORMAT_NONE = 0x656e6f6e;
 const FORMAT_DELT = 0x746c6564;
@@ -67,7 +67,9 @@ class BlobDatabase {
       readonly: false,
     }, options);
 
-    const db = typeof location != 'object' ? levelup(leveldown(location)) : location;
+    const db = typeof location != 'object' ? levelup(rocksdb(location), {
+      readOnly: options.readonly,
+    }) : location;
     this._options = options;
     this._db = db;
   }
