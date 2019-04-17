@@ -112,6 +112,59 @@ class BlobDatabase {
   }
 
   /**
+   * Put a raw blob into database.
+   *
+   * @param {Buffer} hash 256-bit hash of the object to put
+   * @param {Buffer} buffer contents of the blob
+   * @return {Promise}
+   */
+  _rawPut(hash, buffer) {
+    let file = Buffer.alloc(buffer.length + 8);
+    file.writeUInt32LE(buffer.length, 0);
+    file.writeUInt32LE(FORMAT_NONE, 4);
+    buffer.copy(file, 8);
+    return this._db.put(hash, file);
+  }
+
+  /**
+   * Put a raw delta into database.
+   *
+   * @param {Buffer} hash 256-bit hash of the object to put
+   * @param {Buffer} buffer contents of the blob
+   * @param {Buffer} baseHash 256-bit hash of the base object
+   * @param {Buffer} delta deltified contents
+   * @param {Buffer} [file] deltified contents with additional space reserved header. Header will
+   *   be modified.
+   * @return {Promise}
+   */
+  _deltaPut(hash, buffer, baseHash, delta, file) {
+    if (file != null) {
+      file = file.slice(0, delta.length + 40);
+    } else {
+      file = Buffer.alloc(delta.length + 40);
+      delta.copy(file, 40);
+    }
+    file.writeUInt32LE(buffer.length, 0);
+    file.writeUInt32LE(FORMAT_DELT, 4);
+    baseHash.copy(file, 8);
+    return this._db.put(hash, file);
+  }
+
+  /**
+   * Put a blob into database.
+   *
+   * @param {Blob} blob blob to put
+   * @return {Promise}
+   */
+  _blobPut(blob) {
+    if (blob.delta != null) {
+      return this._deltaPut(blob.hash, blob.buffer, blob.base.hash, blob.delta);
+    } else {
+      return this._rawPut(blob.hash, blob.buffer);
+    }
+  }
+
+  /**
    * Retrieve a blob and decompress. Deltified blobs will be kept as is and not resolved.
    *
    * @param {Buffer} hash 256-bit hash of the object to retrieve
@@ -209,11 +262,7 @@ class BlobDatabase {
     if (delta == null) {
       blob.delta = null;
       blob.base = null;
-      file = Buffer.alloc(blob.buffer.length + 8);
-      file.writeInt32LE(blob.buffer.length, 0);
-      file.writeInt32LE(FORMAT_NONE, 4);
-      blob.buffer.copy(file, 8);
-      await this._db.put(blob.hash, file);
+      await this._rawPut(blob.hash, blob.buffer);
       return true;
     }
 
@@ -223,11 +272,7 @@ class BlobDatabase {
     blob.base = grandparent;
     if (await this._reduce(blob)) return true;
 
-    file = file.slice(0, delta.length + 40);
-    file.writeInt32LE(blob.buffer.length, 0);
-    file.writeInt32LE(FORMAT_DELT, 4);
-    grandparent.hash.copy(file, 8);
-    await this._db.put(blob.hash, file);
+    await this._deltaPut(blob.hash, blob.buffer, grandparent.hash, delta, file);
     return true;
   }
 
@@ -289,11 +334,7 @@ class BlobDatabase {
     if ((await this._rawGet(hash)) != null) return hash.toString('hex');
 
     // Upon insertion, the data is by default stored as is without transformation applied.
-    let file = Buffer.alloc(buffer.length + 8);
-    file.writeInt32LE(buffer.length, 0);
-    file.writeInt32LE(FORMAT_NONE, 4);
-    buffer.copy(file, 8);
-    await this._db.put(hash, file);
+    await this._rawPut(hash, buffer);
     return hash.toString('hex');
   }
 
@@ -342,12 +383,7 @@ class BlobDatabase {
     // If reduction modifies the object, then we don't need to insert anymore.
     if (await this._reduce(child)) return;
 
-    // Generate required headers
-    deltaFile = deltaFile.slice(0, delta.length + 40);
-    deltaFile.writeInt32LE(child.buffer.length, 0);
-    deltaFile.writeInt32LE(FORMAT_DELT, 4);
-    parent.hash.copy(deltaFile, 8);
-    return this._db.put(child.hash, deltaFile);
+    return this._deltaPut(child.hash, child.buffer, parent.hash, delta, deltaFile);
   }
 
   /**
@@ -401,11 +437,7 @@ class BlobDatabase {
     // the buffer is the supplied one (otherwise it is loaded from database, so we don't need to
     // write again).
     if (child.delta == null && child.buffer == buffer) {
-      let file = Buffer.alloc(buffer.length + 8);
-      file.writeInt32LE(buffer.length, 0);
-      file.writeInt32LE(FORMAT_NONE, 4);
-      buffer.copy(file, 8);
-      await this._db.put(hash, file);
+      await this._rawPut(hash, buffer);
     }
     return hash.toString('hex');
   }
