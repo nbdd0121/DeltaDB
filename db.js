@@ -37,19 +37,6 @@ function verifyHash(hash) {
   return hash;
 }
 
-/**
- * Helper function to determine if two blob objects are identical.
- *
- * @param {Blob} a
- * @param {Blob} b
- * @return {boolean} Whether a and b are equivalent.
- */
-function equiv(a, b) {
-  if (a == b) return true;
-  if (a == null || b == null) return false;
-  return a.hash.compare(b.hash) == 0;
-}
-
 // Format of file stored on disk:
 //  +-----------+-------------+==================+
 //  | file size | file format |...encoded file...|
@@ -313,36 +300,17 @@ class BlobDatabase {
     let delta = deltify.encode(parent.buffer, child.buffer, deltaFile.slice(40));
     if (delta == null) return false;
 
-    let doPathCompress = true;
     if (child.base != null) {
-      // If `parent` becomes `child`'s base's child, then we should only sway across if there is a
-      // significant benefit (otherwise we undo this operation in path compression).
-      // If `child`'s base becomes `parent`'s child, then we should only sway across if there is no
-      // signicant loss, as this is what we do in path compression.
-      // If none of above is true, the subgraph merging happens way up, then we sway across if there
-      // is any gain at all, and do a path compress to determine which way is better.
-      let gain = child.delta.length - delta.length;
-      let go;
-      if (equiv(parent.base, child.base)) {
-        go = gain >= PATH_COMPRESSION_LOSS_THRESHOLD;
-        doPathCompress = false;
-      } else if (equiv(child.base.base, parent)) {
-        go = gain > -PATH_COMPRESSION_LOSS_THRESHOLD;
-        doPathCompress = false;
-      } else {
-        go = gain > 0;
-      }
-      if (!go) return false;
+      // If we can't save any space, don't re-parent this child
+      if (delta.length - child.delta.length > 0) return false;
     }
 
     child.base = parent;
     child.delta = delta;
 
     // When linking nodes, apply ahead-of-time path compression
-    if (doPathCompress) {
-      // If compression modifies the object, then we don't need to insert anymore.
-      if (await this._compress(child)) return true;
-    }
+    // If compression modifies the object, then we don't need to insert anymore.
+    if (await this._compress(child)) return true;
 
     // Generate required headers
     deltaFile = deltaFile.slice(0, delta.length + 40);
