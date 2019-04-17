@@ -10,8 +10,7 @@ const FORMAT_DELT = 0x746c6564;
 const FORMAT_ZLIB = 0x62696c7a;
 const FORMAT_DLTZ = 0x7a746c64;
 
-const PATH_COMPRESSION_LOSS_THRESHOLD = 512;
-const DELTIFY_GAIN_THRESHOLD = 4096;
+const MINOR_THRESHOLD = 512;
 
 /**
  * Hash a buffer.
@@ -153,50 +152,71 @@ class BlobDatabase {
   }
 
   /**
-   * Perform a single-step path compression.
+   * Perform level-reduction.
    *
    * @method
-   * @param {Blob} blob The blob object to compress.
+   * @param {Blob} blob The blob object to reduce.
    * @return {Promise<boolean>} Returns true if the blob is modified.
    */
-  async _compress(blob) {
-    // Not a delta
-    if (blob.base == null) return false;
+  async _reduce(blob) {
+    /*
+     * To avoid very long chains of deltified blobs, we attempt to reduce the length of delta
+     * chain.  Assuming the following case:
+     *   A --> B --> C
+     * We should remove B from chain if it does not sacrifice much.  Notice that we will need to
+     * determine whether we should perform this operation on each access, therefore we must be able
+     * to determine whether any action should be taken without expensive computation.
+     *
+     * We do this in two ways:
+     * 1) We observe if B is a minor edit to C, then delta of A upon C should be small as well.
+     *    If B is a major edit on the otherhand, then A probably will not deltify well based on C.
+     *    To determine whether B is a minor edit, we just look on the size of its delta on C. This
+     *    heuristic performs really well and have almost no space loss.
+     * 2) If we only have 1) applied, then we can still get very long delta chains.  We therefore
+     *    also enforce stricter limits:
+     *    * A delta must be smaller than half of its original size.  If a delta is larger than half
+     *      of original size, it means that it shares only less than half contents with its parent,
+     *      so we'd better not use delta at all.  This restriction comes with small space loss.
+     *    * A delta of delta must be less than half the size of the base delta.  This is not
+     *      intuitive, and has signifcant space loss.  However, this requirement will allow us to
+     *      prove that the total disk load we need for accessing an item is smaller than twice
+     *      the largest blob on the chain.  Combining with the requirement on 1), it essentially
+     *      limits the chain length to clog2(|max blob| / |minor threshold|)). If max blob isze
+     *      is 64K and minor threshold is 512, the chain will not be longer than 7.
+     */
 
-    // Normally we shouldn't need to do anything for single-level delta. However path compression
-    // may add cost to an extent that it's better to just un-deltify a blob at all. We handle this
-    // case here.
-    if (blob.base.base == null) {
-      if (blob.buffer.length - blob.delta.length < DELTIFY_GAIN_THRESHOLD) {
-        blob.delta = null;
-        blob.base = null;
-        let file = Buffer.alloc(blob.buffer.length + 8);
-        file.writeInt32LE(blob.buffer.length, 0);
-        file.writeInt32LE(FORMAT_NONE, 4);
-        blob.buffer.copy(file, 8);
-        await this._db.put(blob.hash, file);
-        return true;
-      }
-      return false;
-    }
+    // Not a delta or a single level delta
+    if (blob.base == null || blob.base.base == null) return false;
+
+    if (blob.base.delta.length > MINOR_THRESHOLD &&
+        blob.delta.length <= (blob.base.delta.length >> 1)) return false;
 
     let grandparent = blob.base.base;
-    let newDeltaFile = Buffer.alloc(40 + blob.delta.length + PATH_COMPRESSION_LOSS_THRESHOLD);
-    let newDelta = deltify.encode(grandparent.buffer, blob.buffer, newDeltaFile.slice(40));
-    // Path compression isn't worthwhile.
-    if (newDelta == null) return false;
+    let file = Buffer.alloc(40 + (blob.buffer.length >> 1));
+    let delta = deltify.encode(grandparent.buffer, blob.buffer, file.slice(40));
+    // Better to un-deltify this blob.
+    if (delta == null) {
+      blob.delta = null;
+      blob.base = null;
+      file = Buffer.alloc(blob.buffer.length + 8);
+      file.writeInt32LE(blob.buffer.length, 0);
+      file.writeInt32LE(FORMAT_NONE, 4);
+      blob.buffer.copy(file, 8);
+      await this._db.put(blob.hash, file);
+      return true;
+    }
 
-    // Set fields and do recursive compression. If the recursive compression modified the object
+    // Set fields and do recursive reduction. If the recursive reduction modified the object
     // then we don't need to write again.
-    blob.delta = newDelta;
+    blob.delta = delta;
     blob.base = grandparent;
-    if (await this._compress(blob)) return true;
+    if (await this._reduce(blob)) return true;
 
-    newDeltaFile = newDeltaFile.slice(0, newDelta.length + 40);
-    newDeltaFile.writeInt32LE(blob.buffer.length, 0);
-    newDeltaFile.writeInt32LE(FORMAT_DELT, 4);
-    grandparent.hash.copy(newDeltaFile, 8);
-    await this._db.put(blob.hash, newDeltaFile);
+    file = file.slice(0, delta.length + 40);
+    file.writeInt32LE(blob.buffer.length, 0);
+    file.writeInt32LE(FORMAT_DELT, 4);
+    grandparent.hash.copy(file, 8);
+    await this._db.put(blob.hash, file);
     return true;
   }
 
@@ -226,7 +246,7 @@ class BlobDatabase {
       if (body.length != blob.buffer.length) throw new Error('Length mismatch');
       blob.buffer = body;
       blob.base = base;
-      if (!this._options.readonly) await this._compress(blob);
+      if (!this._options.readonly) await this._reduce(blob);
     }
 
     return blob;
@@ -272,12 +292,12 @@ class BlobDatabase {
    * @method
    * @param {Buffer} parent One of the blob to link, usually a larger one
    * @param {Buffer} child One of the blob to link, usually a smaller one
-   * @returns {Promise<boolean>}
+   * @returns {Promise}
    */
   async _link(parent, child) {
     // Double-check that hash are different
     let hashCompare = parent.hash.compare(child.hash);
-    if (hashCompare == 0) return false;
+    if (hashCompare == 0) return;
 
     // Make sure parent.length > child.length, or parent.hash < child.hash if length are equal.
     // This creates a canonical order, which prevents loops.
@@ -286,39 +306,38 @@ class BlobDatabase {
       [parent, child] = [child, parent];
 
     // The file is too small to worth trying delta
-    if (child.buffer.length <= DELTIFY_GAIN_THRESHOLD) return false;
+    if (child.buffer.length <= MINOR_THRESHOLD) return;
 
     // If child is already delta-encoded, link parents first.
     if (child.base != null) {
       await this._link(parent, child.base);
-      // In this case, still perform a delta, as it may generate better result if we sway child to
+      // In this case, still perform a delta, as it may generate better result if we
       // use `parent` as its parent instead of the current one.
     }
 
     // Generate delta. Only use it if it can save enough space.
-    let deltaFile = Buffer.alloc(40 + child.buffer.length - DELTIFY_GAIN_THRESHOLD);
+    let deltaFile = Buffer.alloc(40 + (child.buffer.length >> 1));
     let delta = deltify.encode(parent.buffer, child.buffer, deltaFile.slice(40));
-    if (delta == null) return false;
+    if (delta == null) return;
 
     if (child.base != null) {
       // If we can't save any space, don't re-parent this child
-      if (delta.length - child.delta.length > 0) return false;
+      if (delta.length - child.delta.length > 0) return;
     }
 
     child.base = parent;
     child.delta = delta;
 
-    // When linking nodes, apply ahead-of-time path compression
-    // If compression modifies the object, then we don't need to insert anymore.
-    if (await this._compress(child)) return true;
+    // When linking nodes, apply ahead-of-time chain reduction
+    // If reduction modifies the object, then we don't need to insert anymore.
+    if (await this._reduce(child)) return;
 
     // Generate required headers
     deltaFile = deltaFile.slice(0, delta.length + 40);
     deltaFile.writeInt32LE(child.buffer.length, 0);
     deltaFile.writeInt32LE(FORMAT_DELT, 4);
     parent.hash.copy(deltaFile, 8);
-    await this._db.put(child.hash, deltaFile);
-    return true;
+    return this._db.put(child.hash, deltaFile);
   }
 
   /**
