@@ -55,12 +55,19 @@ function verifyHash(hash) {
 // the underlying store has compression by default (e.g. LevelDB), they should not be used.
 
 class BlobDatabase {
+  /**
+   * Create a blob database
+   *
+   * @param {string} location Location of the database
+   * @param {boolean} [options.readonly] If set to true, delta chain reduction will not happen
+   *   when calling `get()`.
+   */
   constructor(location, options) {
     options = Object.assign({
       readonly: false,
     }, options);
 
-    const db = levelup(typeof location != 'object' ? leveldown(location) : location);
+    const db = typeof location != 'object' ? levelup(leveldown(location)) : location;
     this._options = options;
     this._db = db;
   }
@@ -68,7 +75,6 @@ class BlobDatabase {
   /**
    * Close the database. The object shouldn't be used anymore.
    *
-   * @method
    * @return {Promise}
    */
   close() {
@@ -80,7 +86,6 @@ class BlobDatabase {
   /**
    * Retrieve a raw blob from database.
    *
-   * @method
    * @param {Buffer} hash 256-bit hash of the object to retrieve
    * @return {Promise<Buffer>} Returns the buffer for the blob
    */
@@ -99,7 +104,6 @@ class BlobDatabase {
   /**
    * Retrieve a blob and decompress. Deltified blobs will be kept as is and not resolved.
    *
-   * @method
    * @param {Buffer} hash 256-bit hash of the object to retrieve
    * @return {Promise<Blob>} Returns the blob object
    */
@@ -154,7 +158,6 @@ class BlobDatabase {
   /**
    * Perform level-reduction.
    *
-   * @method
    * @param {Blob} blob The blob object to reduce.
    * @return {Promise<boolean>} Returns true if the blob is modified.
    */
@@ -189,7 +192,7 @@ class BlobDatabase {
     if (blob.base == null || blob.base.base == null) return false;
 
     if (blob.base.delta.length > MINOR_THRESHOLD &&
-        blob.delta.length <= (blob.base.delta.length >> 1)) return false;
+      blob.delta.length <= (blob.base.delta.length >> 1)) return false;
 
     let grandparent = blob.base.base;
     let file = Buffer.alloc(40 + (blob.buffer.length >> 1));
@@ -224,7 +227,6 @@ class BlobDatabase {
    * Retrieve a blob, decompress and de-deltify. The base blob that it is deltified on is also
    * returned.
    *
-   * @method
    * @param {Buffer} hash 256-bit hash of the object to retrieve
    * @return {Promise<Blob>} Returns the blob object and all its bases.
    */
@@ -255,7 +257,6 @@ class BlobDatabase {
   /**
    * Retrieve a blob as buffer.
    *
-   * @method
    * @param {any} hash 256-bit hash of the object to retrieve
    * @return {Promise<Buffer>} Returns the blob
    */
@@ -268,7 +269,6 @@ class BlobDatabase {
   /**
    * Insert a buffer to the database.
    *
-   * @method
    * @param {Buffer} buffer The blob to insert
    * @return {Promise<string>} Returns the 256-bit hash in hex form
    */
@@ -289,7 +289,6 @@ class BlobDatabase {
   /**
    * Hint that two blobs are related, so there is a chance of compression.
    *
-   * @method
    * @param {Buffer} parent One of the blob to link, usually a larger one
    * @param {Buffer} child One of the blob to link, usually a smaller one
    * @returns {Promise}
@@ -343,7 +342,6 @@ class BlobDatabase {
   /**
    * Hint that two blobs are related, so there is a chance of compression.
    *
-   * @method
    * @param {Buffer} parentHash Hash of one of the blob to link, usually a larger one
    * @param {Buffer} childHash Hash of one of the blob to link, usually a smaller one
    * @returns {Promise}
@@ -364,7 +362,6 @@ class BlobDatabase {
    * Insert a blob and relate it to an existing blob. Logically it is equivalent to an insert
    * followed by a link, but it is superior in performance.
    *
-   * @method
    * @param {Buffer} parentHash Hash of the blob to link
    * @param {Buffer} buffer Buffer to insert
    * @returns {Promise<string>} 256-bit hash of buffer, in hex form.
