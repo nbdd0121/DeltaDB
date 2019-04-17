@@ -11,6 +11,7 @@ const FORMAT_ZLIB = 0x62696c7a;
 const FORMAT_DLTZ = 0x7a746c64;
 
 const MINOR_THRESHOLD = 512;
+const COMPRESSION_THRESHOLD = 150;
 
 /**
  * Hash a buffer.
@@ -65,7 +66,8 @@ class BlobDatabase {
    *   calling `get()`. An exception will be thrown if it mismatches. Default to false.
    * @param {string} [options.compression] Determine which compression method to use. `none`
    *   indicates compression should be off; `transparent` means that the lower level key-value
-   *   database will handle compression. Default to `transparent`.
+   *   database will handle compressionl `zlib` indicates that zlib should be attempted before
+   *   inserting into the database. Default to `transparent`.
    */
   constructor(location, options) {
     options = Object.assign({
@@ -118,7 +120,21 @@ class BlobDatabase {
    * @param {Buffer} buffer contents of the blob
    * @return {Promise}
    */
-  _rawPut(hash, buffer) {
+  async _rawPut(hash, buffer) {
+    if (buffer.length >= COMPRESSION_THRESHOLD) {
+      switch (this._options.compression) {
+        case 'zlib': {
+          let compressed = await promisify(zlib.deflate)(buffer);
+          // Fall to `none` format insertion
+          if (compressed.length >= buffer.length) break;
+          let file = Buffer.alloc(compressed.length + 8);
+          file.writeUInt32LE(buffer.length, 0);
+          file.writeUInt32LE(FORMAT_ZLIB, 4);
+          compressed.copy(file, 8);
+          return this._db.put(hash, file);
+        }
+      }
+    }
     let file = Buffer.alloc(buffer.length + 8);
     file.writeUInt32LE(buffer.length, 0);
     file.writeUInt32LE(FORMAT_NONE, 4);
@@ -137,7 +153,22 @@ class BlobDatabase {
    *   be modified.
    * @return {Promise}
    */
-  _deltaPut(hash, buffer, baseHash, delta, file) {
+  async _deltaPut(hash, buffer, baseHash, delta, file) {
+    if (delta.length >= COMPRESSION_THRESHOLD) {
+      switch (this._options.compression) {
+        case 'zlib': {
+          let compressed = await promisify(zlib.deflate)(delta);
+          // Fall to `delt` format insertion
+          if (compressed.length >= delta.length) break;
+          let file = Buffer.alloc(compressed.length + 40);
+          file.writeUInt32LE(buffer.length, 0);
+          file.writeUInt32LE(FORMAT_DLTZ, 4);
+          baseHash.copy(file, 8);
+          compressed.copy(file, 40);
+          return this._db.put(hash, file);
+        }
+      }
+    }
     if (file != null) {
       file = file.slice(0, delta.length + 40);
     } else {
