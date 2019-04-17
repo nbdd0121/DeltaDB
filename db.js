@@ -63,15 +63,20 @@ class BlobDatabase {
    *   when calling `get()`. Default to false.
    * @param {boolean} [options.verify] If set to true, hash will be re-computed and checked when
    *   calling `get()`. An exception will be thrown if it mismatches. Default to false.
+   * @param {string} [options.compression] Determine which compression method to use. `none`
+   *   indicates compression should be off; `transparent` means that the lower level key-value
+   *   database will handle compression. Default to `transparent`.
    */
   constructor(location, options) {
     options = Object.assign({
       readonly: false,
       verify: false,
+      compression: 'transparent',
     }, options);
 
     const db = typeof location != 'object' ? levelup(rocksdb(location), {
       readOnly: options.readonly,
+      compression: options.compression == 'transparent',
     }) : location;
     this._options = options;
     this._db = db;
@@ -266,7 +271,7 @@ class BlobDatabase {
     hash = verifyHash(hash);
     let blob = await this._chainGet(hash);
     if (!blob) return null;
-    if (this.options.verify) {
+    if (this._options.verify) {
       if (calcHash(blob.buffer).compare(hash) != 0) throw new Error('Hash verification failed');
     }
     return blob.buffer;
