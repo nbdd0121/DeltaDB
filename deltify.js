@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: BSD-2-Clause
+ * Copyright (c) 2019, Gary Guo
+ */
+
 // Binary delta encoding/decoding algorithm.
 //
 // References:

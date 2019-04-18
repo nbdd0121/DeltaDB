@@ -1,3 +1,7 @@
+/*
+ * SPDX-License-Identifier: BSD-2-Clause
+ * Copyright (c) 2019, Gary Guo
+ */
 const crypto = require('crypto');
 const { promisify } = require('util');
 const zlib = require('zlib');
