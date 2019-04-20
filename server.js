@@ -66,7 +66,11 @@ function createServer(db) {
               }
             }
             let promise = linkHash ? db.insertLink(linkHash, concat) : db.insert(concat);
-            promise.then(newHash => response.end(newHash), ex => {
+            promise.then(newHash => {
+              response.statusCode = 201;
+              response.setHeader('Location', '/blobs/' + newHash);
+              response.end();
+            }, ex => {
               console.log(ex);
               response.statusCode = 500;
               response.end(ex.message);
