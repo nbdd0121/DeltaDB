@@ -16,6 +16,7 @@ fnv = "1.0"
 url = "2.0"
 getopts = "0.2"
 parking_lot = "0.11"
+bytes = "0.5"
 
 [dependencies.rocksdb]
 version = "0.14"

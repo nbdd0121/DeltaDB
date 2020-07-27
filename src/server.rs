@@ -102,7 +102,7 @@ async fn handle_request(req: Request<Body>, db: Arc<Database>) -> Result<Respons
             }
 
             let db_clone = db.clone();
-            let hash = tokio::task::spawn_blocking(move || db_clone.insert(&entire_body)).await.unwrap()?;
+            let hash = tokio::task::spawn_blocking(move || db_clone.insert(entire_body.into())).await.unwrap()?;
             if let Some(v) = link_hash {
                 tokio::task::spawn_blocking(move || db.link(&hash, &v)).await.unwrap()?;
             }

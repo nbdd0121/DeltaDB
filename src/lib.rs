@@ -4,6 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use parking_lot::Mutex;
+use bytes::Bytes;
 
 pub mod delta;
 
@@ -136,7 +137,7 @@ struct Delta {
 
 struct Blob {
     hash: Hash,
-    buffer: Vec<u8>,
+    buffer: Bytes,
     base: Mutex<Option<Delta>>,
 }
 
@@ -230,7 +231,7 @@ impl Database {
                 Some(RawBlob::Plain(buffer)) => {
                     break Arc::new(Blob {
                         hash,
-                        buffer,
+                        buffer: buffer.into(),
                         base: Mutex::new(None),
                     });
                 }
@@ -246,7 +247,7 @@ impl Database {
             delta::apply_delta(&base_blob.buffer, &delta, &mut buffer).unwrap();
             base_blob = Arc::new(Blob {
                 hash,
-                buffer,
+                buffer: buffer.into(),
                 base: Mutex::new(Some(Delta {
                     base: base_blob,
                     delta,
@@ -446,7 +447,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn get(&self, hash: &Hash) -> io::Result<Option<Vec<u8>>> {
+    pub fn get(&self, hash: &Hash) -> io::Result<Option<Bytes>> {
         Ok(match self.blob_get(hash)? {
             None => None,
             Some(v) => {
@@ -458,9 +459,9 @@ impl Database {
         })
     }
 
-    pub fn insert(&self, buffer: &[u8]) -> io::Result<Hash> {
+    pub fn insert(&self, buffer: Bytes) -> io::Result<Hash> {
         assert!(!self.options.readonly, "Database is readonly");
-        let hash = calc_hash(buffer);
+        let hash = calc_hash(&buffer);
 
         if self.db.get_pinned(&hash.0).map_err(wrap_err)?.is_some() {
             return Ok(hash);
@@ -468,7 +469,7 @@ impl Database {
 
         let blob = Arc::new(Blob {
             hash,
-            buffer: buffer.to_owned(),
+            buffer,
             base: Mutex::new(None),
         });
 
