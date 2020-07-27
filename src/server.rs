@@ -67,7 +67,7 @@ async fn handle_request(req: Request<Body>, db: Arc<Database>) -> Result<Respons
                 Some(v) => v,
             };
             let time = std::time::Instant::now();
-            let blob = db.get(&blob_hash).await?;
+            let blob = tokio::task::spawn_blocking(move || db.get(&blob_hash)).await.unwrap()?;
             eprintln!("{:?}", time.elapsed());
             match blob {
                 Some(blob) => {
@@ -101,9 +101,10 @@ async fn handle_request(req: Request<Body>, db: Arc<Database>) -> Result<Respons
                 }
             }
 
-            let hash = db.insert(&entire_body).await?;
+            let db_clone = db.clone();
+            let hash = tokio::task::spawn_blocking(move || db_clone.insert(&entire_body)).await.unwrap()?;
             if let Some(v) = link_hash {
-                db.link(&hash, &v).await?;
+                tokio::task::spawn_blocking(move || db.link(&hash, &v)).await.unwrap()?;
             }
 
             return Ok(Response::builder()
@@ -133,7 +134,7 @@ async fn handle_request(req: Request<Body>, db: Arc<Database>) -> Result<Respons
                 Some(v) => v,
             };
 
-            db.link(&blob_hash, &link_hash).await?;
+            tokio::task::spawn_blocking(move || db.link(&blob_hash, &link_hash)).await.unwrap()?;
             return Ok(Response::builder()
                 .status(StatusCode::NO_CONTENT)
                 .body(Body::empty())

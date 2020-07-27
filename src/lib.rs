@@ -1,15 +1,11 @@
 use byteorder::{ByteOrder, LE};
-use futures::future;
-use futures::future::BoxFuture;
 use std::fmt;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use parking_lot::Mutex;
 
 pub mod delta;
-mod rocks;
-use rocks::AsyncRocks;
 
 /// Hash of a blob.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -112,7 +108,7 @@ pub fn calc_hash(buffer: &[u8]) -> Hash {
 
 /// A delta database.
 pub struct Database {
-    db: AsyncRocks,
+    db: rocksdb::DB,
     options: Options,
 }
 
@@ -149,6 +145,10 @@ enum RawBlob {
     Delta(usize, Hash, Vec<u8>),
 }
 
+fn wrap_err(err: rocksdb::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::Other, err)
+}
+
 impl Database {
     fn open_path(path: &Path, opts: &Options) -> io::Result<Database> {
         let mut opt = rocksdb::Options::default();
@@ -156,7 +156,7 @@ impl Database {
         if opts.compression == Compression::Transparent {
             opt.set_compression_type(rocksdb::DBCompressionType::Snappy);
         }
-        let db = AsyncRocks::open(path, &opt)?;
+        let db = rocksdb::DB::open(&opt, path).map_err(wrap_err)?;
         Ok(Database {
             db,
             options: opts.clone(),
@@ -169,8 +169,8 @@ impl Database {
     }
 
     // Retrieve a raw blob from database.
-    async fn raw_get(&self, hash: &Hash) -> io::Result<Option<RawBlob>> {
-        let chunk = match self.db.get(&hash.0).await? {
+    fn raw_get(&self, hash: &Hash) -> io::Result<Option<RawBlob>> {
+        let chunk = match self.db.get_pinned(&hash.0).map_err(wrap_err)? {
             None => return Ok(None),
             Some(v) => v,
         };
@@ -212,7 +212,7 @@ impl Database {
     }
 
     // Retrieve a raw blob from database.
-    async fn blob_get(&self, hash: &Hash) -> io::Result<Option<Arc<Blob>>> {
+    fn blob_get(&self, hash: &Hash) -> io::Result<Option<Arc<Blob>>> {
         let mut stack = Vec::new();
 
         // blob_get must not use recursion to avoid stack overflow before blobs are normalized
@@ -220,7 +220,7 @@ impl Database {
         let mut hash = *hash;
         
         let mut base_blob = loop {
-            match self.raw_get(&hash).await? {
+            match self.raw_get(&hash)? {
                 None => {
                     if stack.is_empty() {
                         return Ok(None)
@@ -253,7 +253,7 @@ impl Database {
                 })),
             });
             if !self.options.readonly {
-                self.reduce(&base_blob).await?;
+                self.reduce(&base_blob)?;
             }
         }
 
@@ -261,11 +261,11 @@ impl Database {
     }
 
     /// Put a raw blob into the database.
-    async fn blob_put(&self, blob: &Blob) -> io::Result<()> {
+    fn blob_put(&self, blob: &Blob) -> io::Result<()> {
         let mut file = Vec::with_capacity(blob.buffer.len() + 8);
         file.extend_from_slice(&(blob.buffer.len() as u32).to_le_bytes());
 
-        let guard = blob.base.lock().await;
+        let guard = blob.base.lock();
         match guard.as_ref() {
             Some(delta) => {
                 file.extend_from_slice(&FORMAT_DELT.to_le_bytes());
@@ -307,11 +307,11 @@ impl Database {
         }
         drop(guard);
 
-        return self.db.put(&blob.hash.0, &file).await;
+        self.db.put(&blob.hash.0, &file).map_err(wrap_err)
     }
 
     /// Perform level-reduction. Returns true if the blob is modified.
-    async fn reduce(&self, blob: &Blob) -> io::Result<bool> {
+    fn reduce(&self, blob: &Blob) -> io::Result<bool> {
         /*
          * To avoid very long chains of deltified blobs, we attempt to reduce the length of delta
          * chain.  Assuming the following case:
@@ -340,7 +340,7 @@ impl Database {
 
         let mut mutated = false;
         loop {
-            let mut lock_guard = blob.base.lock().await;
+            let mut lock_guard = blob.base.lock();
             let lock = match *lock_guard {
                 Some(ref mut v) => v,
                 // Not a delta
@@ -348,7 +348,7 @@ impl Database {
             };
 
             let base = lock.base.clone();
-            let mut base_lock_guard = base.base.lock().await;
+            let mut base_lock_guard = base.base.lock();
             let base_lock = match *base_lock_guard {
                 Some(ref mut v) => v,
                 // Single level delta
@@ -371,33 +371,25 @@ impl Database {
             delta::calc_delta(&grandparent.buffer, &blob.buffer, &mut delta);
             // Better to un-deltify this blob
             if delta.len() > blob.buffer.len() / 2 {
-                *blob.base.lock().await = None;
+                *blob.base.lock() = None;
                 break;
             }
 
             // Set fields and do recursive reduction. If the recursive reduction modified the object
             // then we don't need to write again.
-            *blob.base.lock().await = Some(Delta {
+            *blob.base.lock() = Some(Delta {
                 delta,
                 base: grandparent,
             });
         }
 
         if mutated {
-            self.blob_put(&blob).await?;
+            self.blob_put(&blob)?;
         }
         Ok(mutated)
     }
 
-    fn boxed_link_blob<'asyn>(
-        &'asyn self,
-        parent: Arc<Blob>,
-        child: Arc<Blob>,
-    ) -> BoxFuture<'asyn, io::Result<()>> {
-        Box::pin(self.link_blob(parent, child))
-    }
-
-    async fn link_blob(&self, mut parent: Arc<Blob>, mut child: Arc<Blob>) -> io::Result<()> {
+    fn link_blob(&self, mut parent: Arc<Blob>, mut child: Arc<Blob>) -> io::Result<()> {
         let ord = parent.hash.cmp(&child.hash);
         if ord == std::cmp::Ordering::Equal {
             return Ok(());
@@ -416,13 +408,12 @@ impl Database {
             return Ok(());
         }
 
-        let mut lock = child.base.lock().await;
+        let mut lock = child.base.lock();
 
         // If child is already delta-encoded, link parents first.
         if let Some(base) = &*lock {
             // This recursion is fine, it wouldn't cause stack overflow, becauses blobs are normalized already.
-            self.boxed_link_blob(parent.clone(), base.base.clone())
-                .await?;
+            self.link_blob(parent.clone(), base.base.clone())?;
             // In this case, still perform a delta, as it may generate better result if we
             // use `parent` as its parent instead of the current one.
         }
@@ -447,16 +438,16 @@ impl Database {
         });
         std::mem::drop(lock);
 
-        if self.reduce(&child).await? {
+        if self.reduce(&child)? {
             return Ok(());
         }
 
-        self.blob_put(&child).await?;
+        self.blob_put(&child)?;
         Ok(())
     }
 
-    pub async fn get(&self, hash: &Hash) -> io::Result<Option<Vec<u8>>> {
-        Ok(match self.blob_get(hash).await? {
+    pub fn get(&self, hash: &Hash) -> io::Result<Option<Vec<u8>>> {
+        Ok(match self.blob_get(hash)? {
             None => None,
             Some(v) => {
                 if self.options.verify {
@@ -467,11 +458,11 @@ impl Database {
         })
     }
 
-    pub async fn insert(&self, buffer: &[u8]) -> io::Result<Hash> {
+    pub fn insert(&self, buffer: &[u8]) -> io::Result<Hash> {
         assert!(!self.options.readonly, "Database is readonly");
         let hash = calc_hash(buffer);
 
-        if self.db.get(&hash.0).await?.is_some() {
+        if self.db.get_pinned(&hash.0).map_err(wrap_err)?.is_some() {
             return Ok(hash);
         }
 
@@ -481,14 +472,14 @@ impl Database {
             base: Mutex::new(None),
         });
 
-        self.blob_put(&blob).await?;
+        self.blob_put(&blob)?;
         Ok(hash)
     }
 
-    pub async fn link(&self, parent: &Hash, child: &Hash) -> io::Result<()> {
+    pub fn link(&self, parent: &Hash, child: &Hash) -> io::Result<()> {
         assert!(!self.options.readonly, "Database is readonly");
-        match future::try_join(self.blob_get(parent), self.blob_get(child)).await? {
-            (Some(pblob), Some(clob)) => self.link_blob(pblob, clob).await,
+        match (self.blob_get(parent)?, self.blob_get(child)?) {
+            (Some(pblob), Some(clob)) => self.link_blob(pblob, clob),
             _ => Ok(()),
         }
     }
