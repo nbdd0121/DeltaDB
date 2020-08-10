@@ -1,4 +1,4 @@
-use delta_db::{Database, Options, Compression};
+use delta_db::{Compression, Database, Options};
 
 #[test]
 fn test_lorem() {
@@ -21,7 +21,10 @@ fn test_lorem() {
     println!();
 
     for (i, hash) in hashs.iter().enumerate() {
-        assert_eq!(lipsum::lipsum_words_from_seed(i, 0).as_bytes(), &db.get(hash).unwrap().unwrap()[..]);
+        assert_eq!(
+            lipsum::lipsum_words_from_seed(i, 0).as_bytes(),
+            &db.get(hash).unwrap().unwrap()[..]
+        );
         println!("\x1b[1A\r\x1b[0KChecked {} entries", i);
     }
     println!();

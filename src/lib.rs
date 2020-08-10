@@ -1,10 +1,10 @@
 use byteorder::{ByteOrder, LE};
+use bytes::Bytes;
+use parking_lot::Mutex;
 use std::fmt;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-use parking_lot::Mutex;
-use bytes::Bytes;
 
 pub mod delta;
 
@@ -123,7 +123,9 @@ const COMPRESSION_THRESHOLD: usize = 150;
 
 fn compress(src: &[u8], buffer: &mut [u8]) -> Result<usize, ()> {
     let mut compress = flate2::Compress::new(Default::default(), true);
-    let status = compress.compress(src, buffer, flate2::FlushCompress::Finish).unwrap();
+    let status = compress
+        .compress(src, buffer, flate2::FlushCompress::Finish)
+        .unwrap();
     if status != flate2::Status::StreamEnd {
         return Err(());
     }
@@ -178,9 +180,7 @@ impl Database {
         let file_size = LE::read_u32(&chunk[0..]) as usize;
         let format = LE::read_u32(&chunk[4..]);
         let raw_blob = match format {
-            FORMAT_NONE => {
-                RawBlob::Plain(chunk[8..].to_owned())
-            }
+            FORMAT_NONE => RawBlob::Plain(chunk[8..].to_owned()),
             FORMAT_ZLIB => {
                 let mut buffer = Vec::with_capacity(file_size);
                 let mut decompress = flate2::Decompress::new(true);
@@ -219,12 +219,12 @@ impl Database {
         // blob_get must not use recursion to avoid stack overflow before blobs are normalized
         // in depth. We use two passes, one pass to fetch from child to parent, and one pass back.
         let mut hash = *hash;
-        
+
         let mut base_blob = loop {
             match self.raw_get(&hash)? {
                 None => {
                     if stack.is_empty() {
-                        return Ok(None)
+                        return Ok(None);
                     }
                     unreachable!("parent does not exist");
                 }
@@ -357,7 +357,9 @@ impl Database {
             };
 
             // Size constraints are satisified.
-            if base_lock.delta.len() > MINOR_THRESHOLD && lock.delta.len() <= base_lock.delta.len() / 2 {
+            if base_lock.delta.len() > MINOR_THRESHOLD
+                && lock.delta.len() <= base_lock.delta.len() / 2
+            {
                 break;
             }
 

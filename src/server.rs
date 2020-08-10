@@ -66,9 +66,9 @@ async fn handle_request(req: Request<Body>, db: Arc<Database>) -> Result<Respons
                 }
                 Some(v) => v,
             };
-            let time = std::time::Instant::now();
-            let blob = tokio::task::spawn_blocking(move || db.get(&blob_hash)).await.unwrap()?;
-            eprintln!("{:?}", time.elapsed());
+            let blob = tokio::task::spawn_blocking(move || db.get(&blob_hash))
+                .await
+                .unwrap()?;
             match blob {
                 Some(blob) => {
                     return Ok(Response::builder()
@@ -102,9 +102,13 @@ async fn handle_request(req: Request<Body>, db: Arc<Database>) -> Result<Respons
             }
 
             let db_clone = db.clone();
-            let hash = tokio::task::spawn_blocking(move || db_clone.insert(entire_body.into())).await.unwrap()?;
+            let hash = tokio::task::spawn_blocking(move || db_clone.insert(entire_body.into()))
+                .await
+                .unwrap()?;
             if let Some(v) = link_hash {
-                tokio::task::spawn_blocking(move || db.link(&hash, &v)).await.unwrap()?;
+                tokio::task::spawn_blocking(move || db.link(&hash, &v))
+                    .await
+                    .unwrap()?;
             }
 
             return Ok(Response::builder()
@@ -134,7 +138,9 @@ async fn handle_request(req: Request<Body>, db: Arc<Database>) -> Result<Respons
                 Some(v) => v,
             };
 
-            tokio::task::spawn_blocking(move || db.link(&blob_hash, &link_hash)).await.unwrap()?;
+            tokio::task::spawn_blocking(move || db.link(&blob_hash, &link_hash))
+                .await
+                .unwrap()?;
             return Ok(Response::builder()
                 .status(StatusCode::NO_CONTENT)
                 .body(Body::empty())
@@ -167,13 +173,21 @@ pub async fn start_server(addr: std::net::SocketAddr, db: Arc<Database>) -> Resu
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let program = args[0].clone();
 
     let mut opts = getopts::Options::new();
     opts.optopt("h", "host", "address to listen on", "HOST");
     opts.optopt("p", "port", "port to listen on", "PORT");
     opts.reqopt("f", "database", "path to database", "PATH");
 
-    let matches = opts.parse(&args[1..]).unwrap();
+    let matches = match opts.parse(&args[1..]) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("{}", err.to_string());
+            eprintln!("{}", opts.usage(&format!("Usage: {} [options]", program)));
+            return;
+        }
+    };
     let path = matches.opt_str("f").unwrap();
     let port = matches.opt_get("p").unwrap().unwrap_or(3000u16);
     let host = matches
